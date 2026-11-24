@@ -19,7 +19,8 @@ extension TextLabel.Layout {
     /// would make every rebuilt string differ from the one before it, and a
     /// streamed document would lose `reuseTypesetting(from:)` at its first
     /// replacement character.
-    private static var replacementRunDelegates: [ReplacementMetrics: CTRunDelegate] = [:]
+    /// Guarded by `sharedStateLock`: layouts on several threads share it.
+    nonisolated(unsafe) private static var replacementRunDelegates: [ReplacementMetrics: CTRunDelegate] = [:]
     private static let replacementRunDelegateLimit = 64
 
     private static let fontKey = NSAttributedString.Key(kCTFontAttributeName as String)
@@ -96,6 +97,10 @@ extension TextLabel.Layout {
         let descent = CTFontGetDescent(font)
         guard ascent.isFinite, descent.isFinite, descent >= 0, ascent + descent >= 0 else { return nil }
         let key = ReplacementMetrics(ascent: ascent, descent: descent)
+        return sharedStateLock.withLock { replacementRunDelegateLocked(for: key, ascent: ascent, descent: descent) }
+    }
+
+    private static func replacementRunDelegateLocked(for key: ReplacementMetrics, ascent: CGFloat, descent: CGFloat) -> CTRunDelegate? {
         if let delegate = replacementRunDelegates[key] {
             return delegate
         }

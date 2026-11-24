@@ -23,12 +23,17 @@ import Litext
     /// - In the animation layer, a line that touches the animator's `animatingRange` goes to
     ///   the animator, and the animator adds its own content after the lines. Every other
     ///   line is drawn by `CTLineDraw` without a protocol call.
+    ///
+    /// Unlike its superclass, it is used only on the main actor (see `TextLabel.Layout`'s
+    /// threads), by the label that made it.
     @MainActor
-    final class LTXAnimatableTextLayout: TextLabel.Layout {
+    final class LTXAnimatableTextLayout: TextLabel.Layout, @unchecked Sendable {
         /// The label the layout draws for, which owns the animator.
         weak var label: LTXAnimatableLabel?
 
-        private var cachedLineIndex: LTXLineIndex?
+        /// Cleared from the inherited `containerSize` and `invalidateLayout()`, which aren't
+        /// main-actor isolated; this layout is only ever used on the main actor.
+        nonisolated(unsafe) private var cachedLineIndex: LTXLineIndex?
 
         /// The animator drawing the current pass, with what it animates and the frame time.
         /// Set only while `drawAnimation(in:visibleRect:)` runs.

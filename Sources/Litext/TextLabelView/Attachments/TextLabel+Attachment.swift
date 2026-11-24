@@ -20,7 +20,7 @@ extension TextLabel {
     @MainActor
     open class Attachment {
         /// The object replacement character an attachment occupies in the string.
-        public static let replacementText = "\u{FFFC}"
+        public nonisolated static let replacementText = "\u{FFFC}"
 
         /// The size CoreText reserves for this attachment.
         ///
@@ -49,7 +49,7 @@ extension TextLabel {
 
         /// Holds the metrics CoreText reads. The run delegate retains this box instead of the
         /// attachment, so the attachment and its view are released when the caller drops them.
-        private let runMetrics = RunMetrics()
+        private nonisolated let runMetrics = RunMetrics()
         private var cachedRunDelegate: CTRunDelegate?
 
         #if !os(watchOS)
@@ -68,6 +68,16 @@ extension TextLabel {
         /// Creates an empty attachment. Set `size` before laying out text with it.
         public init() {
             size = .zero
+        }
+
+        /// Creates an attachment that only reserves space, from any thread: a layout
+        /// built on a background queue can hold one. Put it in a string with
+        /// `attributedStringFromAnyThread(attributes:)`.
+        public nonisolated init(size: CGSize, descent: CGFloat?) {
+            self.size = size
+            self.descent = descent
+            runMetrics.size = size
+            runMetrics.descent = descent
         }
 
         #if !os(watchOS)
@@ -108,6 +118,31 @@ extension TextLabel {
                 range: range,
             )
             return result
+        }
+
+        /// `attributedString(attributes:)` for an attachment made with
+        /// `init(size:descent:)`, from any thread. It reserves the size the attachment
+        /// was made with; the run delegate isn't shared with later calls.
+        public nonisolated final func attributedStringFromAnyThread(
+            attributes: [NSAttributedString.Key: Any] = [:],
+        ) -> NSAttributedString {
+            let result = NSMutableAttributedString(string: Self.replacementText, attributes: attributes)
+            let range = NSRange(location: 0, length: result.length)
+            result.addAttribute(.litextAttachment, value: self, range: range)
+            var callbacks = RunMetrics.callbacks
+            let unmanagedMetrics = Unmanaged.passRetained(runMetrics)
+            if let delegate = CTRunDelegateCreate(&callbacks, unmanagedMetrics.toOpaque()) {
+                result.addAttribute(kCTRunDelegateAttributeName as NSAttributedString.Key, value: delegate, range: range)
+            } else {
+                unmanagedMetrics.release()
+            }
+            return result
+        }
+
+        /// What the run delegate reports now, readable from any thread: a layout built
+        /// off the main actor measures with these instead of asking `size`.
+        nonisolated var reportedRunMetrics: (size: CGSize, descent: CGFloat?) {
+            (runMetrics.size, runMetrics.descent)
         }
 
         /// The text that stands for the attachment when the selection is copied:
@@ -165,8 +200,10 @@ extension TextLabel {
 extension TextLabel.Attachment {
     /// The metrics a run delegate reports, read by CoreText at typesetting time.
     ///
-    /// Writes happen on the main actor through `Attachment.size`, and CoreText reads happen
-    /// while the main-actor layout typesets, which is why unchecked sendability is sound here.
+    /// Writes happen on the main actor through `Attachment.size`, or once before an
+    /// attachment made with `init(size:descent:)` is handed to a layout; CoreText reads
+    /// happen while a layout typesets, on whichever one thread uses that layout. That is
+    /// why unchecked sendability is sound here.
     final class RunMetrics: @unchecked Sendable {
         static let descentFraction: CGFloat = 0.1
 

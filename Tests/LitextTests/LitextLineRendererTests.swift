@@ -45,7 +45,7 @@ private final class RecordingRenderer: TextLabel.LineRenderer {
 
 @MainActor
 private final class OwnLayoutLabel: TextLabelView {
-    final class OwnLayout: TextLabel.Layout {}
+    final class OwnLayout: TextLabel.Layout, @unchecked Sendable {}
 
     override func makeTextLayout(_ attributedText: NSAttributedString) -> TextLabel.Layout {
         OwnLayout(attributedString: attributedText)

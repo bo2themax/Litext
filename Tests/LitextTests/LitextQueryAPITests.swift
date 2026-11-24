@@ -122,7 +122,7 @@ struct LitextQueryAPITests {
 
 #if !os(watchOS)
     @MainActor
-    private final class ProbeLayout: TextLabel.Layout {}
+    private final class ProbeLayout: TextLabel.Layout, @unchecked Sendable {}
 
     @MainActor
     private final class ProbeLayoutLabel: TextLabelView {

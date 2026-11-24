@@ -60,8 +60,10 @@ import QuartzCore
                 resetInteractionForNewText(replacing: oldValue)
                 let layout = makeTextLayout(attributedText)
                 // Text that only changed near its end, as a streamed document does,
-                // typesets only the paragraphs that changed.
-                layout.reuseTypesetting(from: textLayout)
+                // typesets only the paragraphs that changed. A layout that comes
+                // typeset already (made and measured ahead, perhaps off the main
+                // actor) has nothing to reuse, and needn't keep the old text's lines.
+                if !layout.isTypeset { layout.reuseTypesetting(from: textLayout) }
                 textLayout = layout
             }
         }

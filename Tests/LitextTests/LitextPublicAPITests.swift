@@ -8,7 +8,7 @@ import Litext
 import Testing
 
 @MainActor
-private final class OpenLayoutOverride: TextLabel.Layout {
+private final class OpenLayoutOverride: TextLabel.Layout, @unchecked Sendable {
     override func sizeThatFits(_ size: CGSize) -> CGSize {
         super.sizeThatFits(size)
     }

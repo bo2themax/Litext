@@ -130,7 +130,6 @@ private struct AttachmentMetrics: Equatable {
 
 public extension TextLabel {
     /// One laid-out glyph run, as `TextLabel.Layout.layoutRuns(matching:)` reports it.
-    @MainActor
     struct LayoutRun {
         public let lineIndex: Int
         public let attributes: [NSAttributedString.Key: Any]
@@ -148,7 +147,6 @@ public extension TextLabel {
     ///
     /// Geometry is in CoreText layout space (lower-left origin). Convert it with
     /// `viewRect(fromLayoutRect:)` before comparing it with view coordinates.
-    @MainActor
     struct LayoutLine {
         /// The line's position among the laid-out lines, starting at zero.
         public let index: Int
@@ -191,8 +189,15 @@ extension TextLabel {
     /// layout whose line boxes overlap out of order, which mixed font sizes under a
     /// small `lineHeightMultiple` can produce, falls back to scanning the lines and
     /// returns the same answers.
-    @MainActor
-    open class Layout: NSObject {
+    ///
+    /// ## Threads
+    ///
+    /// A layout may be created, measured and laid out on any thread, then handed to
+    /// another (a background queue preparing a list's rows hands them to the main
+    /// thread, which shows them). It is not safe to use from two threads at once:
+    /// after the hand-off, only the receiving thread uses it. Drawing, highlight
+    /// regions and `lineRenderer` belong to the main actor.
+    open class Layout: NSObject, @unchecked Sendable {
         /// An immutable snapshot of the string the layout was created with.
         open private(set) var attributedString: NSAttributedString
 
@@ -248,6 +253,8 @@ extension TextLabel {
         /// The fill the current lines came from, before its origins were moved into the
         /// container.
         private var adoptedFill: FrameFill?
+        /// Whether the text is laid out at the current `containerSize`.
+        var isTypeset: Bool { lines != nil }
         /// How many lines the last fill took from the source, for tests.
         private(set) var reusedLineCount = 0
         /// How much text the current lines keep alive, for tests.
@@ -278,7 +285,10 @@ extension TextLabel {
         /// Changes whenever the laid-out lines change. Values are unique across
         /// layouts, so a stamp taken from one layout never matches another.
         private(set) var generation: Int
-        private static var lastGeneration = 0
+        nonisolated(unsafe) private static var lastGeneration = 0
+        /// Guards the counters and caches layouts share, which layouts on several
+        /// threads update.
+        static let sharedStateLock = NSLock()
 
         private lazy var hasLineDrawingActions: Bool = attributedStringHasLineDrawingActions()
         private lazy var hasHighlightAttributes: Bool = attributedStringHasHighlightAttributes()
@@ -300,10 +310,12 @@ extension TextLabel {
         /// layout allows far more while staying in a precise double range.
         private static let maxLayoutHeight: CGFloat = 100_000_000
 
+        /// Constants (CoreFoundation strings aren't marked Sendable).
+        ///
         /// Attributes that produce highlight regions, in the order a run's regions
         /// are added: a run carrying both a link and an attachment yields the link
         /// region first.
-        private static let highlightAttributes: [(
+        nonisolated(unsafe) private static let highlightAttributes: [(
             key: NSAttributedString.Key,
             runKey: CFString,
             kind: TextLabel.HighlightRegion.Kind,
@@ -315,8 +327,8 @@ extension TextLabel {
                 .attachment,
             ),
         ]
-        private static let highlightRunKeys = highlightAttributes.map(\.runKey)
-        private static let lineDrawingRunKey = NSAttributedString.Key.litextLineDrawingAction.rawValue as CFString
+        nonisolated(unsafe) private static let highlightRunKeys = highlightAttributes.map(\.runKey)
+        nonisolated(unsafe) private static let lineDrawingRunKey = NSAttributedString.Key.litextLineDrawingAction.rawValue as CFString
 
         public init(attributedString: NSAttributedString) {
             // The framesetter works from its own snapshot of the string, and CTRun
@@ -406,7 +418,11 @@ extension TextLabel {
                 options: [],
             ) { value, range, _ in
                 guard let attachment = value as? TextLabel.Attachment else { return }
-                let synced = attachment.syncRunMetrics()
+                // On the main actor, from `size` (a subclass may compute it); elsewhere,
+                // what the run delegate already reports.
+                let synced = Thread.isMainThread
+                    ? MainActor.assumeIsolated { attachment.syncRunMetrics() }
+                    : attachment.reportedRunMetrics
                 metrics.append(AttachmentMetrics(
                     location: range.location,
                     size: synced.size,
@@ -504,6 +520,7 @@ extension TextLabel {
 
         /// Draws every laid-out line into `context`, which uses a top-left origin
         /// like a view's drawing context. Same as `draw(in:visibleRect:)` with `nil`.
+        @MainActor
         open func draw(in context: CGContext) {
             draw(in: context, visibleRect: nil)
         }
@@ -516,6 +533,7 @@ extension TextLabel {
         /// - Important: Performance-sensitive: this runs on every display pass.
         ///   Pass the dirty rect so long text draws only the lines in view, found
         ///   by binary search.
+        @MainActor
         open func draw(in context: CGContext, visibleRect: CGRect?) {
             guard containerSize.isValidLayoutSize,
                   let lines,
@@ -553,6 +571,7 @@ extension TextLabel {
         ///
         /// - Important: Performance-sensitive: this runs for every visible line on
         ///   every display pass. Avoid allocating or measuring text here.
+        @MainActor
         open func draw(line: CTLine, at index: Int, in context: CGContext) {
             guard let lineRenderer else {
                 CTLineDraw(line, context)
@@ -628,6 +647,7 @@ extension TextLabel {
             }
         }
 
+        @MainActor
         private func processLineDrawingActions(in context: CGContext, lineIndices: Range<Int>) {
             guard hasLineDrawingActions else { return }
 
@@ -685,6 +705,7 @@ extension TextLabel {
         ///
         /// - Important: Performance-sensitive. Text with links or attachments is
         ///   walked run by run; text with neither returns at once.
+        @MainActor
         open func updateHighlightRegions() {
             _highlightRegions.removeAll()
             // Extraction walks every glyph run of every line. Text carrying neither
@@ -975,8 +996,10 @@ extension TextLabel {
         // MARK: - Private Methods
 
         private static func makeGeneration() -> Int {
-            lastGeneration += 1
-            return lastGeneration
+            sharedStateLock.withLock {
+                lastGeneration += 1
+                return lastGeneration
+            }
         }
 
         private func generateLayout() {
@@ -1224,11 +1247,13 @@ extension TextLabel {
             )
         }
 
-        private static var lastTypesettingPass = 0
+        nonisolated(unsafe) private static var lastTypesettingPass = 0
 
         private static func makeTypesettingPass() -> Int {
-            lastTypesettingPass += 1
-            return lastTypesettingPass
+            sharedStateLock.withLock {
+                lastTypesettingPass += 1
+                return lastTypesettingPass
+            }
         }
 
         // MARK: - Reusing an earlier layout's lines
@@ -1552,6 +1577,7 @@ extension TextLabel {
             return low
         }
 
+        @MainActor
         private func extractHighlightRegions() {
             guard let lines, let lineMetrics else { return }
             // The effective range last found for each highlight attribute. A link
@@ -1620,6 +1646,7 @@ extension TextLabel {
             containsAttribute(.litextLineDrawingAction) { $0 is TextLabel.LineDrawingAction }
         }
 
+        @MainActor
         private func processHighlightRegionForRun(
             _ glyphRun: CTRun,
             attributes: [NSAttributedString.Key: Any],
@@ -1656,6 +1683,7 @@ extension TextLabel {
             }
         }
 
+        @MainActor
         private func addHighlightRegion(
             kind: TextLabel.HighlightRegion.Kind,
             attributes: [NSAttributedString.Key: Any],
